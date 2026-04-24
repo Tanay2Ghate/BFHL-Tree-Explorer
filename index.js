@@ -5,14 +5,20 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ── YOUR CREDENTIALS ──────────────────────────────────────────────
-const USER_ID = "johndoe_17091999";        // change to fullname_ddmmyyyy
-const EMAIL_ID = "john.doe@srmist.edu.in"; // change to your college email
-const ROLL_NUMBER = "RA2111003010001";      // change to your roll number
+// ── YOUR CREDENTIALS (UPDATE THESE) ───────────────────────────────
+const USER_ID = "yourname_ddmmyyyy";        // e.g. tanay_01012003
+const EMAIL_ID = "your.email@srmist.edu.in";
+const ROLL_NUMBER = "your_roll_number";
 // ─────────────────────────────────────────────────────────────────
+
+// Root route (fixes "Cannot GET /")
+app.get("/", (req, res) => {
+  res.send("BFHL API is running 🚀");
+});
 
 const VALID_EDGE = /^[A-Z]->[A-Z]$/;
 
+// ── Parse & Validate ─────────────────────────────────────────────
 function parseData(data) {
   const invalidEntries = [];
   const duplicateEdges = [];
@@ -28,14 +34,16 @@ function parseData(data) {
     }
 
     const [parent, child] = entry.split("->");
+
     if (parent === child) {
-      // self-loop → invalid
       invalidEntries.push(raw);
       continue;
     }
 
     if (seenEdges.has(entry)) {
-      if (!duplicateEdges.includes(entry)) duplicateEdges.push(entry);
+      if (!duplicateEdges.includes(entry)) {
+        duplicateEdges.push(entry);
+      }
     } else {
       seenEdges.add(entry);
       validEdges.push([parent, child]);
@@ -45,37 +53,36 @@ function parseData(data) {
   return { invalidEntries, duplicateEdges, validEdges };
 }
 
+// ── Build Hierarchies ────────────────────────────────────────────
 function buildHierarchies(validEdges) {
-  // Collect all nodes
   const allNodes = new Set();
-  const childrenMap = {}; // parent -> [child, ...]
-  const parentOf = {};    // child -> parent (first-wins for multi-parent)
+  const childrenMap = {};
+  const parentOf = {};
 
   for (const [p, c] of validEdges) {
     allNodes.add(p);
     allNodes.add(c);
+
     if (!childrenMap[p]) childrenMap[p] = [];
 
     if (parentOf[c] === undefined) {
-      // first parent wins
       parentOf[c] = p;
       childrenMap[p].push(c);
     }
-    // subsequent parent edges for same child are silently discarded
   }
 
-  // Find connected components (undirected)
+  // Find connected components
   const visited = new Set();
   const components = [];
 
   function dfsComponent(node, comp) {
     visited.add(node);
     comp.add(node);
-    const children = childrenMap[node] || [];
-    for (const c of children) {
+
+    for (const c of childrenMap[node] || []) {
       if (!visited.has(c)) dfsComponent(c, comp);
     }
-    // also walk "up" if this node is a child
+
     const parent = parentOf[node];
     if (parent && !visited.has(parent)) dfsComponent(parent, comp);
   }
@@ -91,39 +98,43 @@ function buildHierarchies(validEdges) {
   const hierarchies = [];
 
   for (const comp of components) {
-    // Find root(s): nodes in comp that are never a child in comp
-    const roots = [...comp].filter((n) => parentOf[n] === undefined || !comp.has(parentOf[n]));
+    const roots = [...comp].filter(
+      (n) => parentOf[n] === undefined || !comp.has(parentOf[n])
+    );
 
-    // Detect cycle using DFS
     function hasCycle(startNodes) {
-      const color = {}; // 0=white,1=gray,2=black
-      let cycleFound = false;
+      const color = {};
+      let cycle = false;
 
       function dfs(n) {
-        if (cycleFound) return;
+        if (cycle) return;
         color[n] = 1;
+
         for (const c of childrenMap[n] || []) {
           if (!comp.has(c)) continue;
-          if (color[c] === 1) { cycleFound = true; return; }
+          if (color[c] === 1) {
+            cycle = true;
+            return;
+          }
           if (!color[c]) dfs(c);
         }
+
         color[n] = 2;
       }
 
       for (const n of startNodes) {
         if (!color[n]) dfs(n);
       }
-      return cycleFound;
+
+      return cycle;
     }
 
     const cycleDetected = hasCycle(roots.length ? roots : [...comp]);
 
     if (cycleDetected) {
-      // Pure cycle: use lex smallest node as root
       const root = [...comp].sort()[0];
       hierarchies.push({ root, tree: {}, has_cycle: true });
     } else {
-      // Build nested tree
       function buildTree(node) {
         const obj = {};
         for (const c of childrenMap[node] || []) {
@@ -133,13 +144,13 @@ function buildHierarchies(validEdges) {
       }
 
       function calcDepth(node) {
-        const children = childrenMap[node] || [];
-        if (children.length === 0) return 1;
-        return 1 + Math.max(...children.filter(c => comp.has(c)).map(calcDepth));
+        const children = (childrenMap[node] || []).filter((c) =>
+          comp.has(c)
+        );
+        if (!children.length) return 1;
+        return 1 + Math.max(...children.map(calcDepth));
       }
 
-      // There should be exactly one root per non-cyclic tree
-      // (multiple roots means disconnected — shouldn't happen here, but handle gracefully)
       for (const root of roots) {
         const tree = { [root]: buildTree(root) };
         const depth = calcDepth(root);
@@ -151,6 +162,7 @@ function buildHierarchies(validEdges) {
   return hierarchies;
 }
 
+// ── Summary ──────────────────────────────────────────────────────
 function buildSummary(hierarchies) {
   const nonCyclic = hierarchies.filter((h) => !h.has_cycle);
   const cyclic = hierarchies.filter((h) => h.has_cycle);
@@ -175,6 +187,7 @@ function buildSummary(hierarchies) {
   };
 }
 
+// ── API ROUTE ────────────────────────────────────────────────────
 app.post("/bfhl", (req, res) => {
   const { data } = req.body;
 
@@ -186,7 +199,7 @@ app.post("/bfhl", (req, res) => {
   const hierarchies = buildHierarchies(validEdges);
   const summary = buildSummary(hierarchies);
 
-  return res.json({
+  res.json({
     user_id: USER_ID,
     email_id: EMAIL_ID,
     college_roll_number: ROLL_NUMBER,
@@ -197,5 +210,5 @@ app.post("/bfhl", (req, res) => {
   });
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+// ✅ IMPORTANT FOR VERCEL
+module.exports = app;
